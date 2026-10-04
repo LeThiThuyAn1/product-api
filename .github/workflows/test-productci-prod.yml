@@ -1,0 +1,118 @@
+name: Product CI Prod
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  integration-test:
+    name: Integration test (API + MongoDB service)
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PORT: 3000
+      MONGO_URI: mongodb://localhost:27017/productdb_test
+      BASE_URL: http://localhost:3000
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm test
+
+      - name: Start API in background
+        run: nohup node src/server.js > api.log 2>&1 &
+
+      - name: Wait for API to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:3000/health; then
+              echo
+              echo "API ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API not ready"
+          cat api.log
+          exit 1
+
+      - name: Run CRUD integration tests
+        run: npm run test:integration
+
+      - name: Show API log on failure
+        if: failure()
+        run: cat api.log
+
+  compose-healthcheck-test:
+    name: Docker Compose + healthcheck test
+    runs-on: ubuntu-latest
+    needs: integration-test
+
+    env:
+      MONGO_USER: ci_admin
+      MONGO_PASSWORD: CiPass123
+      BASE_URL: http://localhost:3000
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build and start with Docker Compose
+        run: docker compose up -d --build
+
+      - name: Wait for MongoDB and API to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            mongo=$(docker inspect --format '{{.State.Health.Status}}' nammongodb 2>/dev/null || echo none)
+            api=$(docker inspect --format '{{.State.Health.Status}}' product-api 2>/dev/null || echo none)
+            echo "try $i: mongodb=$mongo api=$api"
+            if [ "$mongo" = "healthy" ] && [ "$api" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Containers did not become healthy"
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Run CRUD integration tests against containers
+        run: npm run test:integration
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
