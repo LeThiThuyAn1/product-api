@@ -45,7 +45,7 @@ router.put('/:pid', async (req, res) => {
       req.body,
       { new: true, runValidators: true }
     );
-    if (!product) return res.status(404).json({ message: 'Không tìm thấy sản phẩmmm' });
+    if (!product) return res.status(404).json({ message: 'Không tìm thấy sản phẩm' });
     res.json(product);
   } catch (err) {
     res.status(400).json({ message: err.message });
